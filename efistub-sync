@@ -1,10 +1,55 @@
 #!/bin/bash
+set -e
 shopt -s nullglob
+
+PROGNAME="efistub-sync"
+VERSION="0.1.0"
+
+#---help---
+# Usage: efistub-sync all
+#        efistub-sync <kernel> [<kernel>...]
+#        efistub-sync <-h | -V>
+# 
+# Synchronise the EFI Unified Kernel Images on EFI partition with the kernel / commandline / initrd / microcode
+# currently installed on the system; intended to be run after any change to these components, in order to remove
+# need for additional bootloaders.
+# 
+# When run, generates the EFI Unified Kernel Image, then puts it in target directory (defaults to /boot/efi/EFI)
+# for access via boot entry. If the older image is in place, it gets renamed and kept as backup, up to configured
+# number of backups (defaults to 3).
+# 
+# Complimentary Pacman hook ensures the automatic synchronisation when the kernel files, microcode, or initcpio
+# components are modified during installation/update, but should be run manually for manual updates to initramfs,
+# or to preferred command line.
+#
+# Arguments:
+#   all                  If given this argument, synchronises EFI image for every kernel currently installed.
+#   <kernel>...          Package name for the kernel to synchronise, such as "linux" or "linux-tkg"; multiple may be specified.
+# 
+# Options:
+#   -h                   Show this message and exit.
+#   -V                   Show version and exit.
+# 
+# Additional configuration (target directory for EFI images, source of kernel command line, and how many) can be done
+# by modifying the configuration file at /etc/efistub-sync.conf.
+#---help---
+
+help() {
+	sed -n '/^#---help---/,/^#---help---/p' "$0" | sed 's/^# \?//; 1d;$d;'
+}
+
+while getopts ':hV' OPT; do
+	case "$OPT" in
+		h) help; exit 0;;
+		V) echo "$PROGNAME $VERSION"; exit 0;;
+		\?) echo "unknown option: -$OPTARG" 1>&2; exit 1;;
+	esac
+done
 
 # SETTINGS
 TARGET_DIR=/boot/efi/EFI
-COMMAND_LINE="$(cat /proc/cmdline | tr -d '\n')"
-OLD_STUBS_LIMIT=1
+COMMAND_LINE="/proc/cmdline"
+OLD_STUBS_LIMIT=3
 
 # Attempt to load the configuration file, if it's available
 if [ -r "/etc/efistub-sync.conf" ]; then
@@ -14,34 +59,42 @@ fi
 kernels=()
 all_kernels=0
 
-# Process the list of files modified in current run of pacman to figure out which kernels would be refreshed;
-# the way the Pacman hook is set up, the targets will either be the vmlinuz files of kernel packages (in which case
-# we want to generate new EFISTUB), or mkinitcpio/microcode files (in which case, initramfs for all kernels will be
-# updated, so we want to generate new EFISTUB files for all)
-while read -r line; do
+# Process the arguments given; shift all of them out - if any of the arguments is "all",
+# then we go the route of grabbing all valid identifiers; otherwise we check the arguments
+# against available mkinitcpio presets and add them to the list of stubs to sync if valid.
+while (( "$#" )); do
 
-	# Change to initcpio files, initramfs would be regenerated for all kernels
-	if [[ $line != */vmlinuz ]]; then
+	if [ "$1" == "all" ]; then
 		all_kernels=1
 		break
 	fi
 
-	# Get pkgbase, skip if pkgbase does not exist
-	if ! read -r pkgbase > /dev/null 2>&1 < "${line%/vmlinuz}/pkgbase"; then
-		continue
+	if [[ -f "/etc/mkinitcpio.d/$1.preset" ]]; then
+		kernels+=("$1")
+	else
+		echo "$1 is not a valid kernel name" 1>&2
 	fi
 
-	if [[ -f "/etc/mkinitcpio.d/$pkgbase.preset" ]]; then
-		kernels+=("$pkgbase")
-	fi
+	shift
 
 done
 
+# If processing all kernels, go by all the presents for mkinitcpio available.
 if (( all_kernels )); then
+
 	kernels=()
 	while read -r line; do
 		kernels+=("$(basename "${line%.preset}")")
 	done < <(ls "/etc/mkinitcpio.d/"*.preset)
+
+fi
+
+# If the list of kernels is empty by now, something's wrong; print the error message
+# and quit with error code (either the names given on the command line are invalid,
+# or there are no valid mkinitcpio presets).
+if [ "${#kernels[@]}" -lt 1 ]; then
+	echo "No valid kernels to synchronise" 1>&2
+	exit 1
 fi
 
 # Get the list of all microcode images currently residing in boot;

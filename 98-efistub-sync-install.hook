@@ -9,5 +9,5 @@ Target = usr/lib/initcpio/*
 [Action]
 Description = Updating EFISTUB files...
 When = PostTransaction
-Exec = /usr/share/libalpm/scripts/efistub-sync
+Exec = /usr/share/libalpm/scripts/efistub-sync-install
 NeedsTargets
