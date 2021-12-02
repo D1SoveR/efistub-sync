@@ -1,0 +1,30 @@
+#!/bin/bash
+
+args=()
+
+# Process the list of files modified in current run of pacman to figure out which kernels would be refreshed;
+# the way the Pacman hook is set up, the targets will either be the vmlinuz files of kernel packages (in which case
+# we want to generate new EFISTUB), or mkinitcpio/microcode files (in which case, initramfs for all kernels will be
+# updated, so we want to generate new EFISTUB files for all)
+while read -r line; do
+
+	# Change to initcpio files, initramfs would be regenerated for all kernels
+	if [[ $line != */vmlinuz ]]; then
+		args=("all")
+		break
+	fi
+
+	# Get pkgbase, skip if pkgbase does not exist
+	if ! read -r pkgbase > /dev/null 2>&1 < "${line%/vmlinuz}/pkgbase"; then
+		continue
+	fi
+
+	if [[ -f "/etc/mkinitcpio.d/$pkgbase.preset" ]]; then
+		args+=("$pkgbase")
+	fi
+
+done
+
+if (( ${#args[@]} )); then
+	efistub-sync "${args[@]}"
+fi
