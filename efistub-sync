@@ -1,0 +1,106 @@
+#!/bin/bash
+
+# SETTINGS
+TARGET_DIR=/boot/efi/EFI
+COMMAND_LINE="$(cat /proc/cmdline | tr -d '\n')"
+OLD_STUBS_LIMIT=3
+
+kernels=()
+all_kernels=0
+
+# Process the list of files modified in current run of pacman to figure out which kernels would be refreshed;
+# 
+while read -r line; do
+
+	# Change to initcpio files, initramfs would be regenerated for all kernels
+	if [[ $line != */vmlinuz ]]; then
+		all_kernels=1
+		break
+	fi
+
+	# Get pkgbase, skip if pkgbase does not exist
+	if ! read -r pkgbase > /dev/null 2>&1 < "${line%/vmlinuz}/pkgbase"; then
+		continue
+	fi
+
+	if [[ -f "/etc/mkinitcpio.d/$pkgbase.preset" ]]; then
+		kernels+=("$pkgbase")
+	fi
+
+done
+
+if (( all_kernels )); then
+	kernels=()
+	while read -r line; do
+		kernels+=("$(basename "${line%.preset}")")
+	done < <(ls "/etc/mkinitcpio.d/"*.preset)
+fi
+
+# Get the list of all microcode images currently residing in boot;
+# they will be concatenated with initramfs into the EFISTUB, to ensure
+# early loading of such fixes
+readarray -t microcode < <(ls /boot/*ucode*)
+
+for i in "${!microcode[@]}"; do
+	echo "$i ${microcode[$i]}"
+done
+
+# Create temporary directory for all the operations, and ensure it's correctly
+# cleaned up and removed when the whole process is complete
+tmpdir="$(mktemp -dt stubsync.XXXXXX)"
+trap "rm -f $tmpdir/*; rmdir $tmpdir" EXIT HUP INT TERM
+
+for kernel in "${kernels[@]}"; do
+
+	echo "==> Updating EFISTUB for $kernel..."
+	echo "    Generating EFISTUB file..."
+	efi-mkuki -o "$tmpdir/efistub-$kernel.img" -c "$COMMAND_LINE" "/boot/vmlinuz-$kernel" "${microcode[@]}" "/boot/initramfs-$kernel.img"
+
+	# Here we'll add Secure Boot signing
+
+	checksum_new="$(sha256sum -b "$tmpdir/efistub-$kernel.img" | awk '{print $1}')"
+
+	# If we don't have any previous stub of that type, just drop it into the expected location
+	if [ ! -f "$TARGET_DIR/$kernel.efi" ]; then
+		echo "    Copying the newly created file to EFI partition..."
+		mv "$tmpdir/efistub-$kernel.img" "$TARGET_DIR/$kernel.efi"
+	else
+
+		readarray -t existing_stubs < <(ls "$TARGET_DIR/$kernel.efi"*)
+		readarray -t existing_checksums < <(sha256sum "${existing_stubs[@]}" | awk '{print $1}')
+		renumerate=1
+
+		for i in "${!existing_stubs[@]}"; do
+			# Found match for the new file, perform reassignments if need be
+			if [ "$checksum_new" == "${existing_checksums[$i]}" ]; then
+
+				# If it matches the currently active EFISTUB, we don't do anything
+				if [ "$i" == 0 ]; then
+					echo "    Identical EFISTUB already deployed, no further action needed"
+					renumerate=0
+					break
+				else
+					echo "    MATCHED ELSEWHERE"
+					renumerate=2
+				fi
+
+			fi
+		done
+
+		# 
+		if [ "$renumerate" == 1 ]; then
+			echo "    Deploying new EFISTUB..."
+			existing_stubs=("$tmpdir/efistub-$kernel.img" "${existing_stubs[@]}")
+			renumerate=2
+		fi
+
+		if [ "$renumerate" == 2 ]; then
+			for (( i=${#existing_stubs[@]}-1 ; i>=0 ; i-- )) ; do
+    			echo mv "${existing_stubs[$i]}" "$TARGET_DIR/$kernel.efi$([ "$i" == 0 ] && echo "" || echo ".$i")"
+    			mv "${existing_stubs[$i]}" "$TARGET_DIR/$kernel.efi$([ "$i" == 0 ] && echo "" || echo ".$i")"
+			done
+		fi
+
+	fi
+
+done
