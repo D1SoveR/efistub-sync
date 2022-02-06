@@ -3,39 +3,40 @@ set -e
 shopt -s nullglob
 
 PROGNAME="efistub-sync"
-VERSION="0.2.0"
+VERSION="0.2.1"
 
 #---help---
-# Usage: efistub-sync all
-#        efistub-sync <kernel> [<kernel>...]
-#        efistub-sync <-h | -V>
-# 
+# Usage: PROGNAME all
+#        PROGNAME <kernel> [<kernel>...]
+#        PROGNAME <-h | -V>
+#
 # Synchronise the EFI Unified Kernel Images on EFI partition with the kernel / commandline / initrd / microcode
 # currently installed on the system; intended to be run after any change to these components, in order to remove
 # need for additional bootloaders.
-# 
+#
 # When run, generates the EFI Unified Kernel Image, then puts it in target directory (defaults to /boot/efi/EFI)
 # for access via boot entry. If the older image is in place, it gets renamed and kept as backup, up to configured
 # number of backups (defaults to 3).
-# 
+#
 # Complimentary Pacman hook ensures the automatic synchronisation when the kernel files, microcode, or initcpio
 # components are modified during installation/update, but should be run manually for manual updates to initramfs,
 # or to preferred command line.
 #
 # Arguments:
 #   all                  If given this argument, synchronises EFI image for every kernel currently installed.
-#   <kernel>...          Package name for the kernel to synchronise, such as "linux" or "linux-tkg"; multiple may be specified.
-# 
+#   <kernel>...          Package name for the kernel to synchronise, such as "linux", "linux-zen", or "linux-tkg";
+#                        multiple may be specified.
+#
 # Options:
 #   -h                   Show this message and exit.
 #   -V                   Show version and exit.
-# 
+#
 # Additional configuration (target directory for EFI images, source of kernel command line, and how many) can be done
 # by modifying the configuration file at /etc/efistub-sync.conf.
 #---help---
 
 help() {
-	sed -n '/^#---help---/,/^#---help---/p' "$0" | sed 's/^# \?//; 1d;$d;'
+	sed -n '/^#---help---/,/^#---help---/p' "$0" | sed 's/^# \?//; 1d;$d;' | sed 's/PROGNAME/'"$PROGNAME"'/'
 }
 
 while getopts ':hV' OPT; do
@@ -67,6 +68,21 @@ elif [ -n "$SECUREBOOT_KEY" ] || [ -n "$SECUREBOOT_CERT" ]; then
 	echo "Both SECUREBOOT_KEY and SECUREBOOT_CERT configuration options need to be set" 1>&2
 	exit 1
 fi
+
+# Process the command line;
+# if it's a file, read from it into the COMMAND_LINE variable, and also ensure that
+# the trailing newlines are stripped away (only for consistency's sake, as /proc/cmdline
+# always adds a newline to whatever's baked into the EFI image).
+if [ -f "$COMMAND_LINE" ]; then
+	# If the command line is a file, read from it; but throw if it's unreadable for any reason
+	if [ -r "$COMMAND_LINE" ]; then
+		COMMAND_LINE="$(cat "$COMMAND_LINE")"
+	else
+		echo "$COMMAND_LINE cannot be read for kernel parameters" 1>&2
+		exit 1
+	fi
+fi
+COMMAND_LINE="$(echo -n "$COMMAND_LINE" | tr -d '\n')"
 
 kernels=()
 all_kernels=0
