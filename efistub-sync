@@ -20,7 +20,7 @@ set -e
 shopt -s nullglob
 
 PROGNAME="efistub-sync"
-VERSION="0.2.1"
+VERSION="0.3.0"
 
 #---help---
 # Usage: PROGNAME all
@@ -155,13 +155,26 @@ trap "rm -f $tmpdir/*; rmdir $tmpdir" EXIT HUP INT TERM
 for kernel in "${kernels[@]}"; do
 
 	echo "==> Updating EFISTUB for $kernel..."
-	echo "  -> Generating EFISTUB file"
-	efi-mkuki -o "$tmpdir/efistub-$kernel.img" -c "$COMMAND_LINE" "/boot/vmlinuz-$kernel" "${microcode[@]}" "/boot/initramfs-$kernel.img"
+	
+	# Base arguments common to all generations
+	arguments=("--output" "$tmpdir/efistub-$kernel.img" "--cmdline" "$COMMAND_LINE" "--linux" "/boot/vmlinuz-$kernel")
 
+	# Ensure all microcode is loaded first, followed by initramfs
+	for path in "${microcode[@]}"; do
+		arguments+=("--initrd" "$path")
+	done
+	arguments+=("--initrd" "/boot/initramfs-$kernel.img")
+
+	# If Secure Boot signing is being done, add the relevant arguments to ukify command
 	if [ -n "$SECUREBOOT_KEY" ]; then
-		echo "  -> Signing file for Secure Boot"
-		sbsign --key "$SECUREBOOT_KEY" --cert "$SECUREBOOT_CERT" --output "$tmpdir/efistub-$kernel.img" "$tmpdir/efistub-$kernel.img" 2> /dev/null
+		arguments+=("--sign-kernel" "--signtool" "sbsign" "--secureboot-private-key" "$SECUREBOOT_KEY" "--secureboot-certificate" "$SECUREBOOT_CERT")
 	fi
+
+	# The command to build the UKI file should be at the very end of the command
+	arguments+=("build")
+
+	echo "  -> Generating EFISTUB file"
+	/usr/lib/systemd/ukify "${arguments[@]}" &> /dev/null
 
 	checksum_new="$(sha256sum -b "$tmpdir/efistub-$kernel.img" | awk '{print $1}')"
 
